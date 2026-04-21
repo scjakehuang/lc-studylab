@@ -281,34 +281,66 @@ async def query(request: QueryRequest):
                 detail=f"索引不存在: {request.index_name}"
             )
         
-        # 加载索引
+        # 加载索引 + 检索器
         embeddings = get_embeddings()
         vector_store = index_manager.load_index(request.index_name, embeddings)
-        
-        # 创建检索器
         retriever = create_retriever(vector_store, k=request.k)
-        
-        # 创建 RAG Agent
-        agent = create_rag_agent(retriever)
-        
-        # 查询
-        result = query_rag_agent(
-            agent,
-            request.query,
-            return_sources=request.return_sources,
+
+        # 1) 检索相关文档
+        retrieved_docs = await retriever.ainvoke(request.query)
+        logger.info(f"📚 检索到 {len(retrieved_docs)} 个文档")
+
+        # 2) 构建上下文
+        context_blocks = []
+        sources: List[str] = []
+        for i, doc in enumerate(retrieved_docs, 1):
+            src = ""
+            if doc.metadata:
+                src = str(
+                    doc.metadata.get("source")
+                    or doc.metadata.get("filename")
+                    or ""
+                )
+                if src and src not in sources:
+                    sources.append(src)
+            context_blocks.append(
+                f"[文档 {i}{(' | 来源: ' + src) if src else ''}]\n{doc.page_content}"
+            )
+        context_text = "\n\n".join(context_blocks) if context_blocks else "（无相关文档）"
+
+        # 3) 调用 LLM 生成回答
+        from core.models import get_chat_model
+        llm = get_chat_model()
+        system_prompt = (
+            "你是一个智能问答助手。请严格基于下方提供的【参考文档】回答用户问题。\n"
+            "要求：\n"
+            "1. 只使用文档中的信息，不要编造；\n"
+            "2. 用中文清晰、准确地回答；\n"
+            "3. 在合适的位置标注引用，如 [文档1]；\n"
+            "4. 如果文档没有相关信息，请如实说明。"
         )
-        
+        user_prompt = (
+            f"【参考文档】\n{context_text}\n\n"
+            f"【用户问题】\n{request.query}\n\n"
+            f"请基于上述文档回答。"
+        )
+        ai_msg = await llm.ainvoke([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ])
+        answer = ai_msg.content if hasattr(ai_msg, "content") else str(ai_msg)
+
         logger.info("✅ 查询完成")
-        
+
         return QueryResponse(
-            answer=result["answer"],
-            sources=result.get("sources", []),
+            answer=answer,
+            sources=sources if request.return_sources else [],
             retrieved_documents=[
                 {
                     "content": doc.page_content,
                     "metadata": doc.metadata,
                 }
-                for doc in result.get("retrieved_documents", [])
+                for doc in retrieved_docs
             ],
         )
         

@@ -50,7 +50,18 @@ async def lifespan(app: FastAPI):
         logger.info("✅ 配置验证通过")
     except ValueError as e:
         logger.warning(f"⚠️  配置警告: {e}")
-    
+
+    # 将配置同步到环境变量，供底层 SDK（openai、langchain_openai 等）读取
+    import os
+    if settings.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    if settings.openai_api_base:
+        # langchain_openai 读 OPENAI_API_BASE / OPENAI_BASE_URL
+        os.environ["OPENAI_API_BASE"] = settings.openai_api_base
+        os.environ["OPENAI_BASE_URL"] = settings.openai_api_base
+    if settings.tavily_api_key:
+        os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
+
     # 打印配置信息
     logger.info(f"📊 运行环境:")
     logger.info(f"   - 模型: {settings.openai_model}")
